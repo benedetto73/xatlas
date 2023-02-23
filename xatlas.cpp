@@ -73,14 +73,14 @@ Copyright (c) 2012 Brandon Pelfrey
 #define XA_XSTR(x) XA_STR(x)
 
 #ifndef XA_ASSERT
-#define XA_ASSERT(exp) if (!(exp)) { XA_PRINT_WARNING("\rASSERT: %s %s %d\n", XA_XSTR(exp), __FILE__, __LINE__); }
+#define XA_ASSERT(exp)   if (!(exp)) { XA_PRINT_WARNING("\rASSERT: %s %s %d\n", XA_XSTR(exp), __FILE__, __LINE__); }
 #endif
 
 #ifndef XA_DEBUG_ASSERT
 #define XA_DEBUG_ASSERT(exp) assert(exp)
 #endif
 
-#define BP_ASSERT(X)   XA_ASSERT(X)
+#define BP_ASSERT(exp)   if (!(exp)) { printf("\rASSERT: %s %s %d\n", XA_XSTR(exp), __FILE__, __LINE__);  abort(); }
 
 #ifndef XA_PRINT
 #define XA_PRINT(...) \
@@ -3322,9 +3322,9 @@ private:
 					}
 					if (!task)
 						break;
-					std::cout << m_threadIndex << ":!!!! WorkerThread starting task." << std::endl;
+					//std::cout << m_threadIndex << ":!!!! WorkerThread starting task." << std::endl;
 					task->func(group->userData, task->userData);
-					std::cout << m_threadIndex << ":!!!! WorkerThread ending task.  (" << group->ref << ")" << std::endl;
+					//std::cout << m_threadIndex << ":!!!! WorkerThread ending task.  (" << group->ref << ")" << std::endl;
 					group->ref--;
 				}
 			}
@@ -9765,6 +9765,8 @@ void Generate(Atlas *atlas, ChartOptions chartOptions, PackOptions packOptions)
 
 void SetProgressCallback(Atlas *atlas, ProgressFunc progressFunc, void *progressUserData)
 {
+	abort();
+
 	if (!atlas) {
 		XA_PRINT_WARNING("SetProgressCallback: atlas is null.\n");
 		return;
