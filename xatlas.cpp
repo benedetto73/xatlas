@@ -35,13 +35,16 @@ Copyright (c) 2012 Brandon Pelfrey
 */
 #include <atomic>
 #include <condition_variable>
+#include <cstdint>
 #include <exception>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <thread>
 #include <assert.h>
 #include <float.h> // FLT_MAX
 #include <iostream>
+#include <unordered_map>
 #include <limits.h>
 #include <math.h>
 #define __STDC_LIMIT_MACROS
@@ -3136,10 +3139,7 @@ private:
 	std::atomic_flag m_lock = ATOMIC_FLAG_INIT;
 };
 
-struct TaskGroupHandle
-{
-	uint32_t value = UINT32_MAX;
-};
+using TaskGroupHandle = uint64_t;
 
 struct Task
 {
@@ -3147,22 +3147,73 @@ struct Task
 	void *userData; // Passed to func as taskUserData.
 };
 
+
+template <typename K, typename V>
+class sync_unordered_map {
+private:
+	std::unordered_map<K, V> m_data;
+	mutable std::mutex mx_mutex;
+
+public:
+	sync_unordered_map()
+	  : m_data(256) {}
+
+	void insert(const K& k, const V& v) {
+		std::lock_guard<std::mutex> guard(mx_mutex);
+		m_data.insert({k ,v});
+	}
+
+	V& operator[] (const K& k) {
+		std::lock_guard<std::mutex> guard(mx_mutex);
+
+		auto iter = m_data.find(k);
+		if (iter == m_data.end()) {
+			m_data.insert({k, V(0)});
+		}
+		return m_data.find(k)->second;
+	}
+
+	std::optional<const V&> get(const K& k) const {
+		std::lock_guard<std::mutex> guard(mx_mutex);
+
+		auto iter = m_data.find(k);
+		if (iter == m_data.end()) {
+			return std::nullopt;
+		}
+
+		return iter->second;
+	}
+
+	std::optional<K> find_first_of(auto lambda) {
+		std::lock_guard<std::mutex> guard(mx_mutex);
+
+		for (auto & kv : m_data) {
+			if (lambda(kv.second)) {
+				return kv.first;
+			}
+		}
+
+		return std::nullopt;
+	}
+};
+
 #if XA_MULTITHREADED
 class TaskScheduler
 {
+	struct TaskGroup
+	{
+		std::atomic<bool> free;
+		Array<Task> queue; // Items are never removed. queueHead is incremented to pop items.
+		uint32_t queueHead = 0;
+		Spinlock queueLock;
+		std::atomic<uint32_t> ref; // Increment when a task is enqueued, decrement when a task finishes.
+		void *userData;
+	};
+
 public:
 	TaskScheduler() : m_shutdown(false)
 	{
 		m_threadIndex = 0;
-		// Max with current task scheduler usage is 1 per thread + 1 deep nesting, but allow for some slop.
-		m_maxGroups = std::thread::hardware_concurrency() * 4;
-		m_groups = XA_ALLOC_ARRAY(MemTag::Default, TaskGroup, m_maxGroups);
-		for (uint32_t i = 0; i < m_maxGroups; i++) {
-			new (&m_groups[i]) TaskGroup();
-			m_groups[i].free = true;
-			m_groups[i].ref = 0;
-			m_groups[i].userData = nullptr;
-		}
 		m_workers.resize(std::thread::hardware_concurrency() <= 1 ? 1 : std::thread::hardware_concurrency() - 1);
 		for (uint32_t i = 0; i < m_workers.size(); i++) {
 			new (&m_workers[i]) Worker();
@@ -3185,9 +3236,6 @@ public:
 			XA_FREE(worker.thread);
 			worker.~Worker();
 		}
-		for (uint32_t i = 0; i < m_maxGroups; i++)
-			m_groups[i].~TaskGroup();
-		XA_FREE(m_groups);
 	}
 
 	uint32_t threadCount() const
@@ -3195,38 +3243,34 @@ public:
 		return max(1u, std::thread::hardware_concurrency()); // Including the main thread.
 	}
 
+	uint64_t getNewTaskHandle() {
+		static std::atomic<uint64_t> s_counter = 1;
+		return s_counter++;
+	}
+
 	// userData is passed to Task::func as groupUserData.
 	TaskGroupHandle createTaskGroup(void *userData = nullptr, uint32_t reserveSize = 0)
 	{
-		// Claim the first free group.
-		for (uint32_t i = 0; i < m_maxGroups; i++) {
-			TaskGroup &group = m_groups[i];
-			bool expected = true;
-			if (!group.free.compare_exchange_strong(expected, false))
-				continue;
-			group.queueLock.lock();
-			group.queueHead = 0;
-			group.queue.clear();
-			group.queue.reserve(reserveSize);
-			group.queueLock.unlock();
-			group.userData = userData;
-			group.ref = 0;
-			TaskGroupHandle handle;
-			handle.value = i;
-			return handle;
-		}
-		XA_DEBUG_ASSERT(false);
-		std::cerr << "!!!!: createTaskGroup could find an available group!!" << std::endl;
-		abort();
-		TaskGroupHandle handle;
-		handle.value = UINT32_MAX;
+		TaskGroup * group = new TaskGroup;
+
+		group->queueLock.lock();
+		group->queueHead = 0;
+		group->queue.clear();
+		group->queue.reserve(reserveSize);
+		group->queueLock.unlock();
+		group->userData = userData;
+		group->ref = 0;
+
+		TaskGroupHandle handle = getNewTaskHandle();
+
+		m_groups.insert(handle, group);
 		return handle;
 	}
 
 	void run(TaskGroupHandle handle, const Task &task)
 	{
-		BP_ASSERT(handle.value != UINT32_MAX);
-		TaskGroup &group = m_groups[handle.value];
+		BP_ASSERT(handle != 0);
+		TaskGroup &group = *m_groups[handle];
 		group.queueLock.lock();
 		group.queue.push_back(task);
 		group.queueLock.unlock();
@@ -3238,14 +3282,14 @@ public:
 		}
 	}
 
-	void wait(TaskGroupHandle *handle)
+	void wait(TaskGroupHandle& handle)
 	{
-		if (handle->value == UINT32_MAX) {
+		if (handle == 0) {
 			BP_ASSERT(false);
 			return;
 		}
 		// Run tasks from the group queue until empty.
-		TaskGroup &group = m_groups[handle->value];
+		TaskGroup &group = *m_groups[handle];
 		for (;;) {
 			Task *task = nullptr;
 			group.queueLock.lock();
@@ -3261,21 +3305,12 @@ public:
 		while (group.ref > 0)
 			std::this_thread::yield();
 		group.free = true;
-		handle->value = UINT32_MAX;
+		handle = 0;
 	}
 
 	static uint32_t currentThreadIndex() { return m_threadIndex; }
 
 private:
-	struct TaskGroup
-	{
-		std::atomic<bool> free;
-		Array<Task> queue; // Items are never removed. queueHead is incremented to pop items.
-		uint32_t queueHead = 0;
-		Spinlock queueLock;
-		std::atomic<uint32_t> ref; // Increment when a task is enqueued, decrement when a task finishes.
-		void *userData;
-	};
 
 	struct Worker
 	{
@@ -3285,46 +3320,49 @@ private:
 		std::atomic<bool> wakeup;
 	};
 
-	TaskGroup *m_groups;
+	sync_unordered_map<TaskGroupHandle, TaskGroup*> m_groups;
 	Array<Worker> m_workers;
 	std::atomic<bool> m_shutdown;
-	uint32_t m_maxGroups;
 	static thread_local uint32_t m_threadIndex;
 
 	static void workerThread(TaskScheduler *scheduler, Worker *worker, uint32_t threadIndex)
 	{
 		m_threadIndex = threadIndex;
 		std::unique_lock<std::mutex> lock(worker->mutex);
-		std::cout << m_threadIndex << ":!!!! WorkerThread starting." << std::endl;
+		//std::cout << m_threadIndex << ":!!!! WorkerThread starting." << std::endl;
 		try {
 			for (;;) {
 				worker->cv.wait(lock, [=]{ return worker->wakeup.load(); });
 				worker->wakeup = false;
 				for (;;) {
 					if (scheduler->m_shutdown) {
-						std::cout << m_threadIndex << ":!!!! WorkerThread shutting down." << std::endl;
+						//std::cout << m_threadIndex << ":!!!! WorkerThread shutting down." << std::endl;
 						return;
 					}
 					// Look for a task in any of the groups and run it.
 					TaskGroup *group = nullptr;
 					Task *task = nullptr;
-					for (uint32_t i = 0; i < scheduler->m_maxGroups; i++) {
-						group = &scheduler->m_groups[i];
-						if (group->free || group->ref == 0)
-							continue;
-						group->queueLock.lock();
-						if (group->queueHead < group->queue.size()) {
-							task = &group->queue[group->queueHead++];
+
+					scheduler->m_groups.find_first_of(
+						[=, &task] (auto & group) -> bool {
+							if (group->free || group->ref == 0) {
+								return false;
+							}
+							group->queueLock.lock();
+							if (group->queueHead < group->queue.size()) {
+								task = &group->queue[group->queueHead++];
+								group->queueLock.unlock();
+								return true;
+							}
 							group->queueLock.unlock();
-							break;
+							return false;
 						}
-						group->queueLock.unlock();
-					}
+					);
+
 					if (!task)
 						break;
-					//std::cout << m_threadIndex << ":!!!! WorkerThread starting task." << std::endl;
+
 					task->func(group->userData, task->userData);
-					//std::cout << m_threadIndex << ":!!!! WorkerThread ending task.  (" << group->ref << ")" << std::endl;
 					group->ref--;
 				}
 			}
@@ -6264,7 +6302,7 @@ static bool computeUvMeshCharts(TaskScheduler *taskScheduler, ArrayView<UvMesh *
 		task.func = runComputeUvMeshChartsTask;
 		taskScheduler->run(taskGroup, task);
 	}
-	taskScheduler->wait(&taskGroup);
+	taskScheduler->wait(taskGroup);
 	return !progress.cancel;
 }
 
@@ -7602,7 +7640,7 @@ public:
 			task.func = runCreateAndParameterizeChartTask;
 			taskScheduler->run(taskGroup, task);
 		}
-		taskScheduler->wait(&taskGroup);
+		taskScheduler->wait(taskGroup);
 		XA_PROFILE_END(createChartMeshAndParameterizeReal)
 #if XA_RECOMPUTE_CHARTS
 		// Count charts. Skip invalid ones and include new ones added by recomputing.
@@ -7834,7 +7872,7 @@ static void runMeshComputeChartsTask(void *groupUserData, void *taskUserData)
 			task.func = runChartGroupComputeChartsTask;
 			groupArgs->taskScheduler->run(taskGroup, task);
 		}
-		groupArgs->taskScheduler->wait(&taskGroup);
+		groupArgs->taskScheduler->wait(taskGroup);
 		XA_PROFILE_END(chartGroupComputeChartsReal)
 	}
 	XA_PROFILE_END(computeChartsThread)
@@ -7938,7 +7976,7 @@ public:
 			task.func = runMeshComputeChartsTask;
 			taskScheduler->run(taskGroup, task);
 		}
-		taskScheduler->wait(&taskGroup);
+		taskScheduler->wait(taskGroup);
 		XA_PROFILE_END(computeChartsReal)
 		if (progress.cancel)
 			return false;
@@ -8185,7 +8223,7 @@ struct Atlas
 				}
 			}
 		}
-		taskScheduler->wait(&taskGroup);
+		taskScheduler->wait(taskGroup);
 		// Get task output.
 		m_charts.resize(chartCount);
 		for (uint32_t i = 0; i < chartCount; i++)
@@ -9130,7 +9168,7 @@ AddMeshError::Enum AddMesh(Atlas *atlas, const MeshDecl &meshDecl, uint32_t mesh
 	XA_PROFILE_END(addMeshCopyData)
 	ctx->meshes.push_back(mesh);
 	ctx->paramAtlas.addMesh(mesh);
-	if (ctx->addMeshTaskGroup.value == UINT32_MAX)
+	if (ctx->addMeshTaskGroup == 0)
 		ctx->addMeshTaskGroup = ctx->taskScheduler->createTaskGroup(ctx);
 	internal::Task task;
 	task.userData = mesh;
@@ -9161,7 +9199,7 @@ void AddMeshJoin(Atlas *atlas)
 	} else {
 		if (!ctx->addMeshProgress)
 			return;
-		ctx->taskScheduler->wait(&ctx->addMeshTaskGroup);
+		ctx->taskScheduler->wait(ctx->addMeshTaskGroup);
 		ctx->addMeshProgress->~Progress();
 		XA_FREE(ctx->addMeshProgress);
 		ctx->addMeshProgress = nullptr;
