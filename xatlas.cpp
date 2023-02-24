@@ -36,6 +36,7 @@ Copyright (c) 2012 Brandon Pelfrey
 #include <atomic>
 #include <condition_variable>
 #include <mutex>
+#include <stdexcept>
 #include <thread>
 #include <assert.h>
 #include <float.h> // FLT_MAX
@@ -3212,7 +3213,7 @@ public:
 		}
 		XA_DEBUG_ASSERT(false);
 		printf("\rXAtlas createTaskGroup cannot find a suitable task. Aborting\n");
-		abort();
+		throw std::runtime_error("XAtlas createTaskGroup cannot find a suitable task. Aborting");
 		TaskGroupHandle handle;
 		handle.value = UINT32_MAX;
 		return handle;
@@ -3222,7 +3223,7 @@ public:
 	{
 		XA_DEBUG_ASSERT(handle.value != UINT32_MAX);
 		printf("\rXAtlas run: Invalid task. Aborting\n");
-		abort();
+		throw std::runtime_error("XAtlas run: Invalid task. Aborting");
 		TaskGroup &group = m_groups[handle.value];
 		group.queueLock.lock();
 		group.queue.push_back(task);
@@ -3240,7 +3241,7 @@ public:
 		if (handle->value == UINT32_MAX) {
 			XA_DEBUG_ASSERT(false);
 			printf("\rXAtlas wait: Invalid task. Aborting\n");
-			abort();
+			throw std::runtime_error("XAtlas wait: Invalid task. Aborting");
 			return;
 		}
 		// Run tasks from the group queue until empty.
