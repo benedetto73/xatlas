@@ -3211,6 +3211,8 @@ public:
 			return handle;
 		}
 		XA_DEBUG_ASSERT(false);
+		printf("\rXAtlas createTaskGroup cannot find a suitable task. Aborting\n");
+		abort();
 		TaskGroupHandle handle;
 		handle.value = UINT32_MAX;
 		return handle;
@@ -3219,6 +3221,8 @@ public:
 	void run(TaskGroupHandle handle, const Task &task)
 	{
 		XA_DEBUG_ASSERT(handle.value != UINT32_MAX);
+		printf("\rXAtlas run: Invalid task. Aborting\n");
+		abort();
 		TaskGroup &group = m_groups[handle.value];
 		group.queueLock.lock();
 		group.queue.push_back(task);
@@ -3235,6 +3239,8 @@ public:
 	{
 		if (handle->value == UINT32_MAX) {
 			XA_DEBUG_ASSERT(false);
+			printf("\rXAtlas wait: Invalid task. Aborting\n");
+			abort();
 			return;
 		}
 		// Run tasks from the group queue until empty.
