@@ -36,6 +36,7 @@ Copyright (c) 2012 Brandon Pelfrey
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
+#include <cstdio>
 #include <exception>
 #include <mutex>
 #include <optional>
@@ -83,7 +84,7 @@ Copyright (c) 2012 Brandon Pelfrey
 #define XA_DEBUG_ASSERT(exp) assert(exp)
 #endif
 
-#define BP_ASSERT(exp)   if (!(exp)) { printf("\rASSERT: %s %s %d\n", XA_XSTR(exp), __FILE__, __LINE__);  abort(); }
+#define BP_ASSERT(exp)   if (!(exp)) { printf("\rASSERT: %s %s %d\n", XA_XSTR(exp), __FILE__, __LINE__); std::fflush(stdout); abort(); }
 
 #ifndef XA_PRINT
 #define XA_PRINT(...) \
@@ -3329,22 +3330,22 @@ private:
 	{
 		m_threadIndex = threadIndex;
 		std::unique_lock<std::mutex> lock(worker->mutex);
-		//std::cout << m_threadIndex << ":!!!! WorkerThread starting." << std::endl;
+		std::cout << m_threadIndex << ":!!!! WorkerThread starting." << std::endl;
 		try {
 			for (;;) {
 				worker->cv.wait(lock, [=]{ return worker->wakeup.load(); });
 				worker->wakeup = false;
 				for (;;) {
 					if (scheduler->m_shutdown) {
-						//std::cout << m_threadIndex << ":!!!! WorkerThread shutting down." << std::endl;
+						std::cout << m_threadIndex << ":!!!! WorkerThread shutting down." << std::endl;
 						return;
 					}
 					// Look for a task in any of the groups and run it.
-					TaskGroup *group = nullptr;
+					TaskGroup *group0 = nullptr;
 					Task *task = nullptr;
 
 					scheduler->m_groups.find_first_of(
-						[=, &task] (auto & group) -> bool {
+						[=, &group0, &task] (auto & group) -> bool {
 							if (group->free || group->ref == 0) {
 								return false;
 							}
@@ -3352,6 +3353,7 @@ private:
 							if (group->queueHead < group->queue.size()) {
 								task = &group->queue[group->queueHead++];
 								group->queueLock.unlock();
+								group0 = group;
 								return true;
 							}
 							group->queueLock.unlock();
@@ -3362,18 +3364,21 @@ private:
 					if (!task)
 						break;
 
-					task->func(group->userData, task->userData);
-					group->ref--;
+					task->func(group0->userData, task->userData);
+					group0->ref--;
 				}
 			}
 		} catch (const std::runtime_error & ex) {
-			std::cerr << m_threadIndex << ":!!!! std::runtime_error in XAtlas WorkerThread.\n" << ex.what() << "Aborting.\n";
+			std::cout << m_threadIndex << ":!!!! std::runtime_error in XAtlas WorkerThread.\n" << ex.what() << "Aborting.\n";
+			std::fflush(stdout);
 			abort();
 		} catch (const std::exception & ex) {
-			std::cerr << m_threadIndex << ":!!!! std::exception in XAtlas WorkerThread.\n" << ex.what() << "Aborting.\n";
+			std::cout << m_threadIndex << ":!!!! std::exception in XAtlas WorkerThread.\n" << ex.what() << "Aborting.\n";
+			std::fflush(stdout);
 			abort();
 		} catch (...) {
-			std::cerr << m_threadIndex << ":!!!! Unknown Exception in XAtlas WorkerThread. Aborting.\n";
+			std::cout << m_threadIndex << ":!!!! Unknown Exception in XAtlas WorkerThread. Aborting.\n";
+			std::fflush(stdout);
 			abort();
 		}
 	}
