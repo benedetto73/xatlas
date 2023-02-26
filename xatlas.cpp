@@ -40,6 +40,7 @@ Copyright (c) 2012 Brandon Pelfrey
 #include <exception>
 #include <mutex>
 #include <optional>
+#include <sstream>
 #include <stdexcept>
 #include <thread>
 #include <assert.h>
@@ -84,7 +85,7 @@ Copyright (c) 2012 Brandon Pelfrey
 #define XA_DEBUG_ASSERT(exp) assert(exp)
 #endif
 
-#define BP_ASSERT(exp)   if (!(exp)) { printf("\rASSERT: %s %s %d\n", XA_XSTR(exp), __FILE__, __LINE__); std::fflush(stdout); abort(); }
+#define BP_ASSERT(exp)   if (!(exp)) { printf("\r%s: ASSERT: %s %s %d\n", getTID().c_str(), XA_XSTR(exp), __FILE__, __LINE__); std::fflush(stdout); abort(); }
 
 #ifndef XA_PRINT
 #define XA_PRINT(...) \
@@ -3185,18 +3186,25 @@ public:
 		return iter->second;
 	}
 
-	std::optional<K> find_first_of(auto lambda) {
+	std::optional<V> find_first_of(auto lambda) {
 		std::lock_guard<std::mutex> guard(mx_mutex);
 
 		for (auto & kv : m_data) {
 			if (lambda(kv.second)) {
-				return kv.first;
+				return kv.second;
 			}
 		}
 
 		return std::nullopt;
 	}
 };
+
+std::string getTID() {
+    auto myid = std::this_thread::get_id();
+    std::stringstream ss;
+    ss << myid;
+    return ss.str();
+}
 
 #if XA_MULTITHREADED
 class TaskScheduler
@@ -3228,9 +3236,19 @@ public:
 		m_shutdown = true;
 		for (uint32_t i = 0; i < m_workers.size(); i++) {
 			Worker &worker = m_workers[i];
-			XA_DEBUG_ASSERT(worker.thread);
+			XA_ASSERT(worker.thread);
 			worker.wakeup = true;
 			worker.cv.notify_one();
+		}
+		for (uint32_t i = 0; i < m_workers.size(); i++) {
+			Worker &worker = m_workers[i];
+			XA_ASSERT(worker.thread);
+			worker.wakeup = true;
+			worker.cv.notify_one();
+		}
+		for (uint32_t i = 0; i < m_workers.size(); i++) {
+			Worker &worker = m_workers[i];
+			XA_ASSERT(worker.thread);
 			if (worker.thread->joinable())
 				worker.thread->join();
 			worker.thread->~thread();
@@ -3330,22 +3348,26 @@ private:
 	{
 		m_threadIndex = threadIndex;
 		std::unique_lock<std::mutex> lock(worker->mutex);
-		std::cout << m_threadIndex << ":!!!! WorkerThread starting." << std::endl;
+		std::cout << getTID() << ":!!!! WorkerThread starting." << std::endl;
 		try {
 			for (;;) {
+				if (scheduler->m_shutdown) {
+					std::cout << getTID() << ":!!!! WorkerThread shutting down1." << std::endl;
+					return;
+				}
+
 				worker->cv.wait(lock, [=]{ return worker->wakeup.load(); });
 				worker->wakeup = false;
 				for (;;) {
 					if (scheduler->m_shutdown) {
-						std::cout << m_threadIndex << ":!!!! WorkerThread shutting down." << std::endl;
+						std::cout << getTID() << ":!!!! WorkerThread shutting down2." << std::endl;
 						return;
 					}
 					// Look for a task in any of the groups and run it.
-					TaskGroup *group0 = nullptr;
 					Task *task = nullptr;
 
-					scheduler->m_groups.find_first_of(
-						[=, &group0, &task] (auto & group) -> bool {
+					auto opt_group = scheduler->m_groups.find_first_of(
+						[=, &task] (auto & group) -> bool {
 							if (group->free || group->ref == 0) {
 								return false;
 							}
@@ -3353,7 +3375,6 @@ private:
 							if (group->queueHead < group->queue.size()) {
 								task = &group->queue[group->queueHead++];
 								group->queueLock.unlock();
-								group0 = group;
 								return true;
 							}
 							group->queueLock.unlock();
@@ -3361,23 +3382,25 @@ private:
 						}
 					);
 
-					if (!task)
+					if (!task || !opt_group.has_value()) {
 						break;
+					}
 
-					task->func(group0->userData, task->userData);
-					group0->ref--;
+					TaskGroup * group = opt_group.value();
+					task->func(group->userData, task->userData);
+					group->ref--;
 				}
 			}
 		} catch (const std::runtime_error & ex) {
-			std::cout << m_threadIndex << ":!!!! std::runtime_error in XAtlas WorkerThread.\n" << ex.what() << "Aborting.\n";
+			std::cout << getTID() << ":!!!! std::runtime_error in XAtlas WorkerThread.\n" << ex.what() << "Aborting.\n";
 			std::fflush(stdout);
 			abort();
 		} catch (const std::exception & ex) {
-			std::cout << m_threadIndex << ":!!!! std::exception in XAtlas WorkerThread.\n" << ex.what() << "Aborting.\n";
+			std::cout << getTID() << ":!!!! std::exception in XAtlas WorkerThread.\n" << ex.what() << "Aborting.\n";
 			std::fflush(stdout);
 			abort();
 		} catch (...) {
-			std::cout << m_threadIndex << ":!!!! Unknown Exception in XAtlas WorkerThread. Aborting.\n";
+			std::cout << getTID() << ":!!!! Unknown Exception in XAtlas WorkerThread. Aborting.\n";
 			std::fflush(stdout);
 			abort();
 		}
