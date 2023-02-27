@@ -3243,12 +3243,6 @@ public:
 		for (uint32_t i = 0; i < m_workers.size(); i++) {
 			Worker &worker = m_workers[i];
 			XA_ASSERT(worker.thread);
-			worker.wakeup = true;
-			worker.cv.notify_one();
-		}
-		for (uint32_t i = 0; i < m_workers.size(); i++) {
-			Worker &worker = m_workers[i];
-			XA_ASSERT(worker.thread);
 			if (worker.thread->joinable())
 				worker.thread->join();
 			worker.thread->~thread();
@@ -3356,8 +3350,10 @@ private:
 					return;
 				}
 
-				worker->cv.wait(lock, [=]{ return worker->wakeup.load(); });
-				worker->wakeup = false;
+				if (!worker->wakeup.load()) {
+					worker->cv.wait(lock, [=]{ return worker->wakeup.load(); });
+					worker->wakeup = false;
+				}
 				for (;;) {
 					if (scheduler->m_shutdown) {
 						std::cout << getTID() << ":!!!! WorkerThread shutting down2." << std::endl;
