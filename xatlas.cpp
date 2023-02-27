@@ -33,6 +33,9 @@ https://github.com/brandonpelfrey/Fast-BVH
 MIT License
 Copyright (c) 2012 Brandon Pelfrey
 */
+
+#pragma GCC optimize("O0")
+
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
@@ -3233,6 +3236,7 @@ public:
 
 	~TaskScheduler()
 	{
+		XA_PRINT("!!!! xatlas::~TaskScheduler %x", this);
 		m_shutdown = true;
 		for (uint32_t i = 0; i < m_workers.size(); i++) {
 			Worker &worker = m_workers[i];
@@ -3353,6 +3357,8 @@ private:
 				if (!worker->wakeup.load()) {
 					worker->cv.wait(lock, [=]{ return worker->wakeup.load(); });
 					worker->wakeup = false;
+				} else {
+					std::cout << getTID() << ":!!!! ++++" << std::endl;
 				}
 				for (;;) {
 					if (scheduler->m_shutdown) {
